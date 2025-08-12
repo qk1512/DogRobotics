@@ -110,16 +110,26 @@ class LidarCanvas(QWidget):
         painter.drawLine(cx, 0, cx, h)
         painter.drawLine(0, cy, w, cy)
 
-        # draw concentric rings (meters)
-        max_rings = 6
-        ring_spacing = self.property('pixels_per_meter') or 100
+        # draw grid lines
+        grid_size = self.property('pixels_per_meter') or 100
         pen = QPen(QColor(60, 60, 60))
         pen.setStyle(Qt.DotLine)
         painter.setPen(pen)
-        for i in range(1, max_rings + 1):
-            r = int(i * ring_spacing)
-            painter.drawEllipse(cx - r, cy - r, 2 * r, 2 * r)
-            painter.drawText(cx + 4, cy - r + 12, f"{i}m")
+
+        # Vertical lines with labels
+        for x in range(cx % grid_size, w, grid_size):
+            painter.drawLine(x, 0, x, h)
+            # distance from center (meters)
+            dist_m = abs((x - cx) / grid_size)
+            if dist_m > 0:
+                painter.drawText(x + 2, cy - 2, f"{dist_m:.1f}m")
+
+        # Horizontal lines with labels
+        for y in range(cy % grid_size, h, grid_size):
+            painter.drawLine(0, y, w, y)
+            dist_m = abs((cy - y) / grid_size)
+            if dist_m > 0:
+                painter.drawText(cx + 4, y - 2, f"{dist_m:.1f}m")
 
         # draw points
         pen = QPen(self.point_color)
@@ -138,10 +148,11 @@ class LidarCanvas(QWidget):
             painter.setPen(pen)
             for x_m, y_m in frame:
                 px = int(cx + x_m * ppm)
-                py = int(cy - y_m * ppm)  # y axis flip for screen coords
+                py = int(cy - y_m * ppm)  # y axis flip
                 painter.drawPoint(px, py)
 
         painter.end()
+
 
 
 class MainWindow(QMainWindow):
@@ -220,8 +231,12 @@ class MainWindow(QMainWindow):
         for angle_deg, dist_mm in scan_points:
             if dist_mm <= 0:
                 continue
+            #get the angle from 0 to 180
+            if not (0 <=angle_deg <= 180):
+                continue
             r_m = dist_mm / 1000.0
             theta = math.radians(angle_deg)
+            print(angle_deg)
             x = r_m * math.cos(theta)
             y = r_m * math.sin(theta)
             pts.append((x, y))
