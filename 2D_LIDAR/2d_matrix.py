@@ -165,8 +165,8 @@ class LidarCanvas(QWidget):
                                         self.point_color.blue(), a))
                     painter.setPen(pen)
                     for x_m, y_m in frame:
-                        px = int(cx - x_m * ppm)   
-                        py = int(cy - y_m * ppm)
+                        px = int(cx + x_m * ppm)   
+                        py = int(cy + y_m * ppm)
                         #print("Px: ",px)
                         #print("Py: ",py)
                         painter.drawPoint(px, py)
@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
         self.repaint_timer.timeout.connect(self.canvas.update)
         self.repaint_timer.start(33)
 
-        self.planner = SimpleReactivePlanner(safe_dist=0.45, fov_min=-90, fov_max=90)
+        self.planner = SimpleReactivePlanner(safe_dist=0.2, fov_min=-90, fov_max=90)
     def on_scale_changed(self, val):
         self.canvas.setProperty('pixels_per_meter', val)
         self.canvas.update()
@@ -253,11 +253,9 @@ class MainWindow(QMainWindow):
                 continue
             r_m = dist_mm / 1000.0
             # RPLIDAR: 0° tại X+, tăng CW -> đổi sang CCW khi tính toán:
-            theta = math.radians(-angle_deg + 90)
+            theta = math.radians(angle_deg-90)
             x = r_m * math.cos(theta)
             y = r_m * math.sin(theta)
-            #print("x is ", x)
-            #print("y is ", y)
             pts.append((x, y))
         result = self.planner.choose_action(scan_points)
         print(result["action"], result["target_angle"], result["v"], result["omega"])
