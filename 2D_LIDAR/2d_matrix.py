@@ -2,20 +2,9 @@
 """
 RPLIDAR A2M8 realtime viewer using PyQt5
 
-Features:
-- Reads scans from RPLIDAR via rplidar library in a background thread
-- Emits scans to main GUI thread
-- Paints points on a QWidget using QPainter (fast enough for typical rates)
-- Configurable serial port and scale
-
-Requirements:
-    pip install pyqt5 rplidar numpy
-
-Usage:
-    python rplidar_pyqt5_viewer.py --port /dev/ttyUSB0
-    or on Windows: --port COM3
-
-Note: adjust SCALE (pixels per meter) for zoom level.
+- 0° tại trục X+ (bên phải), góc tăng theo chiều kim đồng hồ (CW) — đúng với RPLIDAR A2.
+- Chuyển CW -> CCW khi tính (x,y) bằng cách dùng theta = radians(-angle_deg).
+- Vẽ điểm: px = cx + x*ppm, py = cy - y*ppm (lật Y do màn hình).
 """
 
 import sys
@@ -24,13 +13,17 @@ import argparse
 import time
 from collections import deque
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSpinBox, QFileDialog
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QMainWindow, QVBoxLayout, QLabel,
+    QHBoxLayout, QPushButton, QSpinBox
+)
 from PyQt5.QtGui import QPainter, QColor, QPen
 
+from planning_path import *
 try:
     from rplidar import RPLidar
-except Exception as e:
+except Exception:
     RPLidar = None
 
 import numpy as np
@@ -55,11 +48,10 @@ class LidarThread(QThread):
             self._lidar = RPLidar(self.port, baudrate=self.baudrate, timeout=1)
             self._lidar.start_motor()
             time.sleep(0.5)  # đợi ổn định
-            # start motor if needed (library normally handles it)
             for scan in self._lidar.iter_scans():
                 if not self._running:
                     break
-                # scan is list of tuples (quality, angle, distance)
+                # scan: list of (quality, angle_deg, distance_mm)
                 points = [(s[1], s[2]) for s in scan]
                 self.scan_ready.emit(points)
         except Exception as e:
@@ -82,77 +74,104 @@ class LidarCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(600, 600)
-        self.points = []  # list of (x_pixels, y_pixels)
+        # Giữ (x_m, y_m) sau khi đã đổi từ polar
+        self.points = []                 # list[(x_m, y_m)]
+        self.trail = deque(maxlen=5)     # các frame gần nhất (vệt mờ)
         self.bg_color = QColor(10, 10, 10)
         self.point_color = QColor(0, 255, 0)
-        self.trail = deque(maxlen=5)  # keep a few recent frames if desired
 
     def update_scan(self, points_xy):
-        # points_xy: list of (x_m, y_m)
+        """points_xy: list of (x_m, y_m)"""
         self.trail.append(points_xy)
         self.points = points_xy
-        # trigger repaint
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), self.bg_color)
+        try:
+            painter.fillRect(self.rect(), self.bg_color)
 
-        w = self.width()
-        h = self.height()
-        cx = w // 2
-        cy = h // 2
+            w = self.width()
+            h = self.height()
+            cx = w // 2
+            cy = h // 2
 
-        # draw crosshair
-        pen = QPen(QColor(80, 80, 80))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(cx, 0, cx, h)
-        painter.drawLine(0, cy, w, cy)
+            # pixels per meter
+            ppm = self.property('pixels_per_meter') or 100
 
-        # draw grid lines
-        grid_size = self.property('pixels_per_meter') or 100
-        pen = QPen(QColor(60, 60, 60))
-        pen.setStyle(Qt.DotLine)
-        painter.setPen(pen)
-
-        # Vertical lines with labels
-        for x in range(cx % grid_size, w, grid_size):
-            painter.drawLine(x, 0, x, h)
-            # distance from center (meters)
-            dist_m = abs((x - cx) / grid_size)
-            if dist_m > 0:
-                painter.drawText(x + 2, cy - 2, f"{dist_m:.1f}m")
-
-        # Horizontal lines with labels
-        for y in range(cy % grid_size, h, grid_size):
-            painter.drawLine(0, y, w, y)
-            dist_m = abs((cy - y) / grid_size)
-            if dist_m > 0:
-                painter.drawText(cx + 4, y - 2, f"{dist_m:.1f}m")
-
-        # draw points
-        pen = QPen(self.point_color)
-        pen.setWidth(4)
-        painter.setPen(pen)
-
-        ppm = self.property('pixels_per_meter') or 100
-
-        # optional: draw trails from recent frames with fading
-        alpha_step = 200 // max(1, len(self.trail))
-        for t_idx, frame in enumerate(self.trail):
-            a = 255 - (len(self.trail) - 1 - t_idx) * alpha_step
-            if a < 40:
-                a = 40
-            pen.setColor(QColor(self.point_color.red(), self.point_color.green(), self.point_color.blue(), a))
+            # === Trục chính (X ngang, Y dọc) ===
+            pen = QPen(QColor(80, 80, 80))
+            pen.setWidth(1)
             painter.setPen(pen)
-            for x_m, y_m in frame:
-                px = int(cx + x_m * ppm)
-                py = int(cy - y_m * ppm)  # y axis flip
-                painter.drawPoint(px, py)
+            painter.drawLine(0, cy, w, cy)  # trục X (0°–180°)
+            painter.drawLine(cx, 0, cx, h)  # trục Y (90°–270°)
 
-        painter.end()
+            # === Lưới mét ===
+            pen = QPen(QColor(60, 60, 60))
+            pen.setStyle(Qt.DotLine)
+            painter.setPen(pen)
 
+            grid_size = ppm  # mỗi 1m
+            # dọc
+            for x in range(cx % grid_size, w, grid_size):
+                painter.drawLine(x, 0, x, h)
+                dist_m = abs((x - cx) / grid_size)
+                if dist_m > 0:
+                    painter.drawText(x + 2, cy - 2, f"{dist_m:.1f}m")
+            # ngang
+            for y in range(cy % grid_size, h, grid_size):
+                painter.drawLine(0, y, w, y)
+                dist_m = abs((cy - y) / grid_size)
+                if dist_m > 0:
+                    painter.drawText(cx + 4, y - 2, f"{dist_m:.1f}m")
+
+            # === Vòng tròn tham chiếu + nhãn góc (đúng CW, 0° tại X+) ===
+            ref_radius_m = 1.2
+            ref_radius_px = int(ppm * ref_radius_m)
+
+            pen = QPen(QColor(120, 120, 120))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.drawEllipse(QPoint(cx, cy), ref_radius_px, ref_radius_px)
+
+            # Nhãn góc mỗi 30°
+            pen = QPen(QColor(150, 150, 150))
+            painter.setPen(pen)
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+
+            for ang in range(0, 360, 30):
+                # Đổi sang CW: dùng -ang khi tính vị trí
+                theta = math.radians(ang)
+                # Vị trí chữ
+                x_txt = cx + math.sin(theta) * (ref_radius_px + 10)  # ngang
+                y_txt = cy - math.cos(theta) * (ref_radius_px + 10)  # dọc (lật trục Y)
+                painter.drawText(int(x_txt) - 10, int(y_txt), f"{ang}°")
+
+            # === Vẽ điểm quét (trail + frame hiện tại) ===
+            pen = QPen(self.point_color)
+            pen.setWidth(4)
+
+            # Trail (mờ dần)
+            if len(self.trail) > 0:
+                alpha_step = 200 // max(1, len(self.trail))
+                for t_idx, frame in enumerate(self.trail):
+                    a = 255 - (len(self.trail) - 1 - t_idx) * alpha_step
+                    if a < 40:
+                        a = 40
+                    pen.setColor(QColor(self.point_color.red(),
+                                        self.point_color.green(),
+                                        self.point_color.blue(), a))
+                    painter.setPen(pen)
+                    for x_m, y_m in frame:
+                        px = int(cx - x_m * ppm)   
+                        py = int(cy - y_m * ppm)
+                        #print("Px: ",px)
+                        #print("Py: ",py)
+                        painter.drawPoint(px, py)
+        finally:
+            painter.end()
 
 
 class MainWindow(QMainWindow):
@@ -168,11 +187,12 @@ class MainWindow(QMainWindow):
 
         # controls
         controls = QWidget()
-        hl = QHBoxLayout()
-        controls.setLayout(hl)
+        hl = QHBoxLayout(controls)
 
         self.scale_label = QLabel('Scale (px/m):')
-        self.scale_spin = QSpinBox(); self.scale_spin.setRange(10, 1000); self.scale_spin.setValue(100)
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setRange(10, 1000)
+        self.scale_spin.setValue(100)
         self.scale_spin.valueChanged.connect(self.on_scale_changed)
 
         self.start_btn = QPushButton('Start')
@@ -188,19 +208,19 @@ class MainWindow(QMainWindow):
         hl.addStretch()
 
         container = QWidget()
-        vbox = QVBoxLayout()
-        container.setLayout(vbox)
+        vbox = QVBoxLayout(container)
         vbox.addWidget(self.canvas)
         vbox.addWidget(controls)
         self.setCentralWidget(container)
 
         self.lidar_thread = None
 
-        # refresh timer to repaint at ~30 FPS if needed
+        # repaint ~30 FPS
         self.repaint_timer = QTimer(self)
         self.repaint_timer.timeout.connect(self.canvas.update)
         self.repaint_timer.start(33)
 
+        self.planner = SimpleReactivePlanner(safe_dist=0.45, fov_min=-90, fov_max=90)
     def on_scale_changed(self, val):
         self.canvas.setProperty('pixels_per_meter', val)
         self.canvas.update()
@@ -226,20 +246,21 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_new_scan(self, scan_points):
-        # convert polar -> cartesian (meters) and send to canvas
+        """Nhận (angle_deg, dist_mm), đổi sang (x_m, y_m) theo đúng quy ước CW của LIDAR."""
         pts = []
         for angle_deg, dist_mm in scan_points:
             if dist_mm <= 0:
                 continue
-            #get the angle from 0 to 180
-            if not (0 <=angle_deg <= 180):
-                continue
             r_m = dist_mm / 1000.0
-            theta = math.radians(angle_deg)
-            print(angle_deg)
+            # RPLIDAR: 0° tại X+, tăng CW -> đổi sang CCW khi tính toán:
+            theta = math.radians(-angle_deg + 90)
             x = r_m * math.cos(theta)
             y = r_m * math.sin(theta)
+            #print("x is ", x)
+            #print("y is ", y)
             pts.append((x, y))
+        result = self.planner.choose_action(scan_points)
+        print(result["action"], result["target_angle"], result["v"], result["omega"])
         self.canvas.update_scan(pts)
 
 
