@@ -126,26 +126,45 @@ class LidarCanvas(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.canvas = LidarCanvas()
-        self.setCentralWidget(self.canvas)
-        self.setWindowTitle("Lidar Custom Data Demo")
+        self.canvas_raw = LidarCanvas()
+        self.canvas_smooth = LidarCanvas()
 
-        # Tạo timer để cập nhật dữ liệu giả
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.addWidget(self.canvas_raw)
+        layout.addWidget(self.canvas_smooth)
+        self.setCentralWidget(container)
+
+        self.setWindowTitle("Lidar Raw vs Filtered Demo")
+
+        # Timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_custom_data)
-        self.timer.start(500)  # 0.5 giây cập nhật một lần
+        self.timer.start(500)
 
         self.angle = 0
 
     def update_custom_data(self):
-        points_xy = []
-        #for a in range(0, 360, 10):
-        dist_m = 1.0 + 0.2 * math.sin(math.radians(0 - 90 + self.angle))
-        x = math.cos(math.radians(0-90)) * dist_m
-        y = math.sin(math.radians(0-90)) * dist_m
-        points_xy.append((x, y))
-        self.canvas.update_scan(points_xy)
-        self.angle += 10
+        # --- Tạo data giả (raw) ---
+        points_raw = []
+        dist_m = 1.0 + 0.4 * math.sin(math.radians(self.angle))
+        x = math.cos(math.radians(self.angle)) * dist_m
+        y = math.sin(math.radians(self.angle)) * dist_m
+        points_raw.append((x, y))
+
+        # --- Xử lý giả (filtered) ---
+        # Ở đây mình demo = giảm biên độ nhiễu
+        dist_m_smooth = 1.0 + 0.2 * math.sin(math.radians(self.angle))
+        x_s = math.cos(math.radians(self.angle)) * dist_m_smooth
+        y_s = math.sin(math.radians(self.angle)) * dist_m_smooth
+        points_smooth = [(x_s, y_s)]
+
+        # Update 2 canvas
+        self.canvas_raw.update_scan(points_raw)
+        self.canvas_smooth.update_scan(points_smooth)
+
+        self.angle += 15
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

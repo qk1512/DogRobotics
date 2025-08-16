@@ -26,6 +26,8 @@ try:
 except Exception:
     RPLidar = None
 
+from pre_processing import *
+
 import numpy as np
 
 
@@ -167,8 +169,6 @@ class LidarCanvas(QWidget):
                     for x_m, y_m in frame:
                         px = int(cx + x_m * ppm)   
                         py = int(cy + y_m * ppm)
-                        #print("Px: ",px)
-                        #print("Py: ",py)
                         painter.drawPoint(px, py)
         finally:
             painter.end()
@@ -182,12 +182,21 @@ class MainWindow(QMainWindow):
         self.port = port
         self.baudrate = baudrate
 
-        self.canvas = LidarCanvas(self)
-        self.canvas.setProperty('pixels_per_meter', 100)  # default scale
+        # canvas raw + smooth
+        self.canvas_raw = LidarCanvas(self)
+        self.canvas_smooth = LidarCanvas(self)
+
+        self.canvas_smooth.setProperty('pixels_per_meter', 100)  # default scale
+
+        # đặt 2 canvas song song
+        canvases = QWidget()
+        canv_layout = QHBoxLayout(canvases)
+        canv_layout.addWidget(self.canvas_raw)
+        canv_layout.addWidget(self.canvas_smooth)
 
         # controls
         controls = QWidget()
-        hl = QHBoxLayout(controls)
+        ctrl_layout = QHBoxLayout(controls)
 
         self.scale_label = QLabel('Scale (px/m):')
         self.scale_spin = QSpinBox()
@@ -201,29 +210,31 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.start_lidar)
         self.stop_btn.clicked.connect(self.stop_lidar)
 
-        hl.addWidget(self.scale_label)
-        hl.addWidget(self.scale_spin)
-        hl.addWidget(self.start_btn)
-        hl.addWidget(self.stop_btn)
-        hl.addStretch()
+        ctrl_layout.addWidget(self.scale_label)
+        ctrl_layout.addWidget(self.scale_spin)
+        ctrl_layout.addWidget(self.start_btn)
+        ctrl_layout.addWidget(self.stop_btn)
+        ctrl_layout.addStretch()
 
+        # bố trí chính
         container = QWidget()
         vbox = QVBoxLayout(container)
-        vbox.addWidget(self.canvas)
-        vbox.addWidget(controls)
+        vbox.addWidget(canvases)   # phần hiển thị raw + smooth
+        vbox.addWidget(controls)   # phần nút điều khiển
         self.setCentralWidget(container)
 
         self.lidar_thread = None
 
-        # repaint ~30 FPS
-        self.repaint_timer = QTimer(self)
-        self.repaint_timer.timeout.connect(self.canvas.update)
-        self.repaint_timer.start(33)
-
         self.planner = SimpleReactivePlanner(safe_dist=0.2, fov_min=-90, fov_max=90)
+        self.smoother = LidarSmoother()
+
+    def update_canvases(self):
+        self.canvas_raw.update()
+        self.canvas_smooth.update()
+
     def on_scale_changed(self, val):
-        self.canvas.setProperty('pixels_per_meter', val)
-        self.canvas.update()
+        self.canvas_smooth.setProperty('pixels_per_meter', val)
+        self.canvas_smooth.update()
 
     def start_lidar(self):
         if self.lidar_thread and self.lidar_thread.isRunning():
@@ -246,20 +257,46 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_new_scan(self, scan_points):
-        """Nhận (angle_deg, dist_mm), đổi sang (x_m, y_m) theo đúng quy ước CW của LIDAR."""
-        pts = []
+    # 1. Chuẩn hóa dữ liệu thành vector khoảng cách theo góc
+        min_dist_mm = 100
+        max_dist_mm = 1000
+        dists = np.full(360, np.nan)
         for angle_deg, dist_mm in scan_points:
-            if dist_mm <= 0:
+            if min_dist_mm <= dist_mm <= max_dist_mm:
+                a = int(round(angle_deg)) % 360
+                dists[a] = dist_mm
+
+        # 2. Lọc với pre_processing
+        dists_filtered = self.smoother(dists)
+
+        # 3. Chuyển sang tọa độ (x,y)
+        pts = []
+        pts_raw = []
+        for a in range(360):
+            dist_mm = dists_filtered[a]
+            dist_raw = dists[a]
+            if np.isnan(dist_mm) or dist_mm <= 0:
                 continue
             r_m = dist_mm / 1000.0
-            # RPLIDAR: 0° tại X+, tăng CW -> đổi sang CCW khi tính toán:
-            theta = math.radians(angle_deg-90)
+            r_raw = dist_raw / 1000.0
+            theta = math.radians(a - 90)
             x = r_m * math.cos(theta)
+            x_raw = r_raw * math.cos(theta)
             y = r_m * math.sin(theta)
+            y_raw = r_raw * math.sin(theta)
             pts.append((x, y))
-        result = self.planner.choose_action(scan_points)
-        print(result["action"], result["target_angle"], result["v"], result["omega"])
-        self.canvas.update_scan(pts)
+            pts_raw.append((x_raw,y_raw))
+
+        # 4. Gọi planner
+        #result = self.planner.choose_action(list(zip(range(360), dists_filtered)))
+        #print(result["action"], result["target_angle"], result["v"], result["omega"])
+
+        # 5. Cập nhật canvas
+        
+        self.canvas_smooth.update_scan(pts)
+        self.canvas_raw.update_scan(pts_raw)
+
+
 
 
 def parse_args():
